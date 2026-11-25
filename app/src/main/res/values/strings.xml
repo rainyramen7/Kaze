@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Kaze</string>
+    <string name="share_drop_label">Drop via Kaze</string>
+    <string name="tile_push_label">Push to Mac</string>
+</resources>

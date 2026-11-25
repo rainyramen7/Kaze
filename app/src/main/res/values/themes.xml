@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Kaze" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/suzuri_base</item>
+        <item name="android:statusBarColor">@color/suzuri_base</item>
+        <item name="android:navigationBarColor">@color/suzuri_base</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <style name="Theme.Kaze.Transparent" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.55</item>
+    </style>
+</resources>
