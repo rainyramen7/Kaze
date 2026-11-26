@@ -86,6 +86,7 @@ data class KazeUiState(
     val statusMessage: String? = null,
     val statusIsError: Boolean = false,
     val showJapaneseLabels: Boolean = true,
+    val backgroundListenEnabled: Boolean = false,
     val discoveredMacs: List<DiscoveredMac> = emptyList(),
     val sessionHistory: List<SessionBreeze> = emptyList(),
     val deviceShortFingerprint: String = ""
@@ -135,6 +136,7 @@ class KazeConnectionManager(private val appContext: Context) {
             status = if (store.loadPairedMac() != null) ConnectionStatus.DISCOVERING else ConnectionStatus.UNPAIRED,
             pairedMac = store.loadPairedMac(),
             showJapaneseLabels = store.showJapaneseLabels(),
+            backgroundListenEnabled = store.backgroundListenEnabled(),
             deviceShortFingerprint = identity.shortFingerprint
         )
     )
@@ -144,6 +146,10 @@ class KazeConnectionManager(private val appContext: Context) {
     val incomingToasts: SharedFlow<IncomingToastEvent> = _incomingToasts.asSharedFlow()
 
     private val writeLock = Any()
+    private val lifecycleLock = Any()
+    private var foregroundRefCount: Int = 0
+    private var idleShutdownJob: Job? = null
+
     @Volatile private var activeSocket: Socket? = null
     @Volatile private var activeOut: DataOutputStream? = null
     @Volatile private var activeCipher: KazeSessionCipher? = null
@@ -154,7 +160,6 @@ class KazeConnectionManager(private val appContext: Context) {
     private val incomingFiles = mutableMapOf<String, IncomingFileBuffer>()
 
     init {
-        nsd.start()
         scope.launch {
             nsd.discovered.collect { macs ->
                 _uiState.update { it.copy(discoveredMacs = macs) }
@@ -169,7 +174,10 @@ class KazeConnectionManager(private val appContext: Context) {
                     store.savePairedMac(updated)
                     _uiState.update { it.copy(pairedMac = updated) }
                 }
-                if (_uiState.value.status == ConnectionStatus.DISCOVERING && activeCipher == null) {
+                val shouldConnect = synchronized(lifecycleLock) {
+                    foregroundRefCount > 0 || _uiState.value.backgroundListenEnabled
+                }
+                if (shouldConnect && _uiState.value.status == ConnectionStatus.DISCOVERING && activeCipher == null) {
                     connectToPairedMac()
                 }
             }
@@ -177,9 +185,75 @@ class KazeConnectionManager(private val appContext: Context) {
     }
 
     fun startDiscoveryAndConnect() {
+        synchronized(lifecycleLock) {
+            idleShutdownJob?.cancel()
+            idleShutdownJob = null
+        }
         nsd.start()
         if (_uiState.value.pairedMac != null && activeCipher == null) {
             connectToPairedMac()
+        }
+    }
+
+    /** Called when any Kaze UI (MainActivity, ShareDropActivity, QuickPushActivity) comes to the foreground. */
+    fun acquireForegroundSession() {
+        synchronized(lifecycleLock) {
+            foregroundRefCount += 1
+            idleShutdownJob?.cancel()
+            idleShutdownJob = null
+        }
+        startDiscoveryAndConnect()
+    }
+
+    /**
+     * Called when a Kaze UI leaves the foreground. If Background Listen is OFF (the default),
+     * waits a brief 20s grace period (for quick app switching to copy text) before cleanly tearing
+     * down NSD and the LAN socket for zero idle battery use and no persistent notification.
+     */
+    fun releaseForegroundSession() {
+        val shouldScheduleShutdown = synchronized(lifecycleLock) {
+            foregroundRefCount = (foregroundRefCount - 1).coerceAtLeast(0)
+            foregroundRefCount == 0 && !_uiState.value.backgroundListenEnabled
+        }
+        if (shouldScheduleShutdown) {
+            scheduleIdleDisconnect()
+        }
+    }
+
+    private fun scheduleIdleDisconnect() {
+        idleShutdownJob?.cancel()
+        idleShutdownJob = scope.launch {
+            delay(20_000L)
+            val stillIdle = synchronized(lifecycleLock) {
+                foregroundRefCount == 0 && !_uiState.value.backgroundListenEnabled
+            }
+            if (stillIdle && _uiState.value.transferProgress == null && incomingFiles.isEmpty()) {
+                nsd.stop()
+                connectionJob?.cancel()
+                disconnectSocket()
+                _uiState.update { state ->
+                    state.copy(
+                        status = if (state.pairedMac != null) ConnectionStatus.DISCOVERING else ConnectionStatus.UNPAIRED,
+                        latencyMs = null
+                    )
+                }
+            }
+        }
+    }
+
+    fun setBackgroundListenEnabled(enabled: Boolean) {
+        store.setBackgroundListenEnabled(enabled)
+        _uiState.update { it.copy(backgroundListenEnabled = enabled) }
+        if (enabled) {
+            synchronized(lifecycleLock) {
+                idleShutdownJob?.cancel()
+                idleShutdownJob = null
+            }
+            KazeConnectionService.start(appContext)
+        } else {
+            KazeConnectionService.stop(appContext)
+            val isBg = synchronized(lifecycleLock) { foregroundRefCount == 0 }
+            if (isBg) scheduleIdleDisconnect()
         }
     }
 
@@ -551,6 +625,7 @@ class KazeConnectionManager(private val appContext: Context) {
                 )
                 runCatching { sendEnvelope(KazeEnvelope(type = "ack", id = env.id)) }
                 triggerBurst()
+                postBanner("Received breeze from $macName", isError = false)
                 _incomingToasts.tryEmit(
                     IncomingToastEvent(
                         id = env.id,

@@ -28,7 +28,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FileUpload
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.HorizontalDivider
@@ -55,10 +57,18 @@ import com.kaze.app.ui.components.WindBridgeCard
 import com.kaze.app.ui.components.suzuriGridBackground
 import com.kaze.app.ui.theme.SuzuriColors
 
+sealed interface ClipboardPreviewState {
+    data object Empty : ClipboardPreviewState
+    data object SensitiveBlocked : ClipboardPreviewState
+    data class Text(val content: String, val isUrl: Boolean) : ClipboardPreviewState
+}
+
 @Composable
 fun MainScreen(
     state: KazeUiState,
-    onPushClipboard: () -> Unit,
+    clipboardPreview: ClipboardPreviewState,
+    onRefreshClipboard: () -> Unit,
+    onPushPreviewText: (String) -> Unit,
     onPickFile: () -> Unit,
     onOpenPairing: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -238,7 +248,7 @@ fun MainScreen(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // 3. Primary Manual Push Actions (or Pair Mac CTA if unpaired)
+                // 3. Pair Mac CTA OR Live Clipboard Preview Card + Quick Drop
                 if (state.pairedMac == null) {
                     Box(
                         modifier = Modifier
@@ -283,93 +293,59 @@ fun MainScreen(
                         }
                     }
                 } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        // Push Clipboard (Persimmon primary CTA)
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(if (isConnected) SuzuriColors.Persimmon else SuzuriColors.SurfaceAlt)
-                                .clickable(enabled = isConnected, onClick = onPushClipboard)
-                                .padding(14.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = if (jp) "送る · CLIP" else "PUSH CLIP",
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = if (isConnected) SuzuriColors.Base.copy(alpha = 0.78f) else SuzuriColors.Faint
-                                )
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Outlined.ArrowForward,
-                                    contentDescription = null,
-                                    tint = if (isConnected) SuzuriColors.Base else SuzuriColors.Faint,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = "Push Clipboard",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isConnected) SuzuriColors.Base else SuzuriColors.Mist
-                            )
-                            Text(
-                                text = if (isConnected) "Manual · 1 tap" else "Tap bridge to retry",
-                                fontSize = 10.5.sp,
-                                color = if (isConnected) SuzuriColors.Base.copy(alpha = 0.8f) else SuzuriColors.Faint
-                            )
-                        }
+                    ClipboardPreviewCard(
+                        preview = clipboardPreview,
+                        isConnected = isConnected,
+                        macName = state.pairedMac.deviceName,
+                        showJapanese = jp,
+                        onRefresh = onRefreshClipboard,
+                        onPush = onPushPreviewText
+                    )
 
-                        // Quick Drop File
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(SuzuriColors.Surface)
-                                .border(1.dp, SuzuriColors.Hairline, RoundedCornerShape(14.dp))
-                                .clickable(enabled = isConnected, onClick = onPickFile)
-                                .padding(14.dp)
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Compact Quick Drop File Bar
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(SuzuriColors.Surface)
+                            .border(1.dp, SuzuriColors.Hairline, RoundedCornerShape(12.dp))
+                            .clickable(enabled = isConnected, onClick = onPickFile)
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
+                            Icon(
+                                imageVector = Icons.Outlined.FileUpload,
+                                contentDescription = null,
+                                tint = if (isConnected) SuzuriColors.Persimmon else SuzuriColors.Faint,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column {
                                 Text(
-                                    text = if (jp) "添付 · FILE" else "DROP FILE",
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 10.sp,
-                                    color = SuzuriColors.Faint
+                                    text = if (jp) "添付 · Quick Drop File" else "Quick Drop File",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isConnected) SuzuriColors.Ivory else SuzuriColors.Mist
                                 )
-                                Icon(
-                                    imageVector = Icons.Outlined.FileUpload,
-                                    contentDescription = null,
-                                    tint = if (isConnected) SuzuriColors.Persimmon else SuzuriColors.Faint,
-                                    modifier = Modifier.size(16.dp)
+                                Text(
+                                    text = "Photo, PDF, or any file → ~/Downloads/Kaze",
+                                    fontSize = 10.5.sp,
+                                    color = SuzuriColors.Mist
                                 )
                             }
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = "Quick Drop",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (isConnected) SuzuriColors.Ivory else SuzuriColors.Mist
-                            )
-                            Text(
-                                text = "Photo, PDF, note",
-                                fontSize = 10.5.sp,
-                                color = SuzuriColors.Mist
-                            )
                         }
+                        Text(
+                            text = "PICK",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            color = if (isConnected) SuzuriColors.Persimmon else SuzuriColors.Faint
+                        )
                     }
                 }
 
@@ -461,7 +437,7 @@ fun MainScreen(
                             .padding(16.dp)
                     ) {
                         Text(
-                            text = "No breezes yet this session. Push from Mac with ⌘⇧K or share any photo/link via Android's Share Sheet.",
+                            text = "No breezes yet this session. Copy text in any app to preview above, press ⌘⇧K on Mac, or Share → Drop via Kaze.",
                             fontSize = 12.sp,
                             lineHeight = 18.sp,
                             color = SuzuriColors.Faint
@@ -478,6 +454,7 @@ fun MainScreen(
                                     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                     cm.setPrimaryClip(ClipData.newPlainText("Kaze", text))
                                     Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+                                    onRefreshClipboard()
                                 },
                                 onApproveQuarantine = { onApproveQuarantine(item.id) },
                                 onDiscardQuarantine = { onDiscardQuarantine(item.id) }
@@ -496,7 +473,7 @@ fun MainScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "PINNED P-256 · MANUAL PUSH",
+                        text = if (state.backgroundListenEnabled) "PINNED P-256 · BG LISTEN" else "PINNED P-256 · ON-DEMAND",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
                         color = SuzuriColors.Faint
@@ -506,6 +483,169 @@ fun MainScreen(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
                         color = SuzuriColors.Faint
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClipboardPreviewCard(
+    preview: ClipboardPreviewState,
+    isConnected: Boolean,
+    macName: String,
+    showJapanese: Boolean,
+    onRefresh: () -> Unit,
+    onPush: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(SuzuriColors.Surface)
+            .border(1.dp, SuzuriColors.Hairline, RoundedCornerShape(14.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // Header Row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = if (showJapanese) "クリップボード · CLIPBOARD PREVIEW" else "CLIPBOARD PREVIEW",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.8.sp,
+                    color = SuzuriColors.Mist
+                )
+                if (preview is ClipboardPreviewState.Text) {
+                    Text(
+                        text = if (preview.isUrl) "URL" else "${preview.content.length}c",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        color = SuzuriColors.Persimmon,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(SuzuriColors.PersimmonSoft)
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                    )
+                }
+            }
+
+            Icon(
+                imageVector = Icons.Outlined.Refresh,
+                contentDescription = "Refresh clipboard preview",
+                tint = SuzuriColors.Mist,
+                modifier = Modifier
+                    .size(16.dp)
+                    .clickable(onClick = onRefresh)
+            )
+        }
+
+        // Preview Body
+        when (preview) {
+            is ClipboardPreviewState.Empty -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(SuzuriColors.Base)
+                        .border(1.dp, SuzuriColors.Hairline, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 14.dp)
+                ) {
+                    Text(
+                        text = "Clipboard is empty. Copy text or a link in any app to inspect it here before pushing.",
+                        fontSize = 11.5.sp,
+                        lineHeight = 17.sp,
+                        color = SuzuriColors.Faint
+                    )
+                }
+            }
+
+            is ClipboardPreviewState.SensitiveBlocked -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(SuzuriColors.Base)
+                        .border(1.dp, SuzuriColors.Persimmon.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(9.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Lock,
+                        contentDescription = null,
+                        tint = SuzuriColors.Persimmon,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "Sensitive / password-manager clipboard item — hidden & blocked from push.",
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp,
+                        color = SuzuriColors.Mist
+                    )
+                }
+            }
+
+            is ClipboardPreviewState.Text -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(SuzuriColors.Base)
+                        .border(1.dp, SuzuriColors.HairlineStrong, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 11.dp)
+                ) {
+                    Text(
+                        text = preview.content,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        color = SuzuriColors.Ivory,
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // Explicit Push Confirmation Button (only rendered when preview has safe text!)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isConnected) SuzuriColors.Persimmon else SuzuriColors.SurfaceAlt)
+                        .clickable(enabled = isConnected) { onPush(preview.content) }
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isConnected) {
+                            if (showJapanese) "送る · Push Above to $macName" else "Push Above to $macName"
+                        } else {
+                            "Reconnect on Wi-Fi to Push"
+                        },
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isConnected) SuzuriColors.Base else SuzuriColors.Faint,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Outlined.ArrowForward,
+                        contentDescription = null,
+                        tint = if (isConnected) SuzuriColors.Base else SuzuriColors.Faint,
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }

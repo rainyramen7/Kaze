@@ -36,6 +36,7 @@ import com.kaze.app.ui.theme.SuzuriColors
 fun SettingsSheet(
     state: KazeUiState,
     hasOverlayPermission: Boolean,
+    onToggleBackgroundListen: (Boolean) -> Unit,
     onToggleJapanese: (Boolean) -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onOpenPairing: () -> Unit,
@@ -67,6 +68,41 @@ fun SettingsSheet(
                     color = SuzuriColors.Ivory
                 )
                 KakiMotif(size = 15.dp)
+            }
+
+            // Opt-in Background Listen toggle (OFF by default -> zero persistent notification!)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(SuzuriColors.Base)
+                    .border(1.dp, SuzuriColors.Hairline, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                    Text("Background Listen", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = SuzuriColors.Ivory)
+                    Text(
+                        text = if (state.backgroundListenEnabled) {
+                            "Active · Keeps LAN socket open (requires Android notification)"
+                        } else {
+                            "Off · Connects on-demand only (0% idle battery, no notification)"
+                        },
+                        fontSize = 11.sp,
+                        color = if (state.backgroundListenEnabled) SuzuriColors.Persimmon else SuzuriColors.Celadon
+                    )
+                }
+                Switch(
+                    checked = state.backgroundListenEnabled,
+                    onCheckedChange = onToggleBackgroundListen,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = SuzuriColors.Base,
+                        checkedTrackColor = SuzuriColors.Persimmon,
+                        uncheckedThumbColor = SuzuriColors.Mist,
+                        uncheckedTrackColor = SuzuriColors.SurfaceAlt
+                    )
+                )
             }
 
             // Bilingual JP toggle

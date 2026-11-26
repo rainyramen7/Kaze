@@ -64,6 +64,12 @@ class TrustedMacStore(context: Context) {
         prefs.edit().putBoolean(KEY_SHOW_JP, show).apply()
     }
 
+    fun backgroundListenEnabled(): Boolean = prefs.getBoolean(KEY_BG_LISTEN, false)
+
+    fun setBackgroundListenEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_BG_LISTEN, enabled).apply()
+    }
+
     private fun getOrCreateKey(): SecretKey? {
         return try {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -118,5 +124,6 @@ class TrustedMacStore(context: Context) {
         private const val KEY_ALIAS = "kaze_prefs_aes_v1"
         private const val KEY_PAIRED_MAC_ENC = "paired_mac_enc"
         private const val KEY_SHOW_JP = "show_jp_labels"
+        private const val KEY_BG_LISTEN = "background_listen_enabled"
     }
 }

@@ -10,13 +10,11 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -24,22 +22,31 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.kaze.app.net.KazeConnectionService
+import com.kaze.app.ui.screens.ClipboardPreviewState
 import com.kaze.app.ui.screens.MainScreen
 import com.kaze.app.ui.screens.PairingScreen
 import com.kaze.app.ui.screens.SettingsSheet
 import com.kaze.app.ui.theme.KazeTheme
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
+    private val clipboardPreviewFlow = MutableStateFlow<ClipboardPreviewState>(ClipboardPreviewState.Empty)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         val manager = (application as KazeApplication).connectionManager
-        KazeConnectionService.start(this)
+        if (manager.uiState.value.backgroundListenEnabled) {
+            KazeConnectionService.start(this)
+        } else {
+            KazeConnectionService.stop(this)
+        }
 
         setContent {
             KazeTheme {
                 val state by manager.uiState.collectAsState()
+                val clipboardPreview by clipboardPreviewFlow.collectAsState()
                 var showPairing by remember { mutableStateOf(false) }
                 var showSettings by remember { mutableStateOf(false) }
                 var hasCameraPerm by remember {
@@ -54,7 +61,7 @@ class MainActivity : ComponentActivity() {
 
                 val notifPermissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission()
-                ) { /* optional */ }
+                ) { /* optional when Background Listen is enabled */ }
 
                 val cameraPermissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission()
@@ -67,15 +74,6 @@ class MainActivity : ComponentActivity() {
                 ) { uri: Uri? ->
                     if (uri != null) {
                         manager.sendFileUri(uri)
-                    }
-                }
-
-                LaunchedEffect(Unit) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                        ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) !=
-                        PackageManager.PERMISSION_GRANTED
-                    ) {
-                        notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
                 }
 
@@ -96,7 +94,9 @@ class MainActivity : ComponentActivity() {
                 } else {
                     MainScreen(
                         state = state,
-                        onPushClipboard = { readAndPushClipboard(manager) },
+                        clipboardPreview = clipboardPreview,
+                        onRefreshClipboard = { refreshClipboardPreview() },
+                        onPushPreviewText = { text -> manager.pushClipboardText(text) },
                         onPickFile = { filePickerLauncher.launch(arrayOf("*/*")) },
                         onOpenPairing = { showPairing = true },
                         onOpenSettings = {
@@ -114,6 +114,15 @@ class MainActivity : ComponentActivity() {
                     SettingsSheet(
                         state = state,
                         hasOverlayPermission = hasOverlayPerm,
+                        onToggleBackgroundListen = { enabled ->
+                            if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                                PackageManager.PERMISSION_GRANTED
+                            ) {
+                                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            manager.setBackgroundListenEnabled(enabled)
+                        },
                         onToggleJapanese = { manager.setShowJapaneseLabels(it) },
                         onOpenOverlaySettings = {
                             val intent = Intent(
@@ -130,11 +139,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun readAndPushClipboard(manager: com.kaze.app.net.KazeConnectionManager) {
+    override fun onStart() {
+        super.onStart()
+        (application as KazeApplication).connectionManager.acquireForegroundSession()
+    }
+
+    override fun onStop() {
+        (application as KazeApplication).connectionManager.releaseForegroundSession()
+        super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            refreshClipboardPreview()
+        }
+    }
+
+    private fun refreshClipboardPreview() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = cm.primaryClip
         if (clip == null || clip.itemCount == 0) {
-            Toast.makeText(this, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+            clipboardPreviewFlow.value = ClipboardPreviewState.Empty
             return
         }
         val isSensitive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -143,10 +169,15 @@ class MainActivity : ComponentActivity() {
             false
         }
         if (isSensitive) {
-            Toast.makeText(this, "Blocked: Sensitive password clipboard item", Toast.LENGTH_SHORT).show()
+            clipboardPreviewFlow.value = ClipboardPreviewState.SensitiveBlocked
             return
         }
         val text = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty().trim()
-        manager.pushClipboardText(text)
+        if (text.isEmpty()) {
+            clipboardPreviewFlow.value = ClipboardPreviewState.Empty
+        } else {
+            val isUrl = text.startsWith("http://") || text.startsWith("https://")
+            clipboardPreviewFlow.value = ClipboardPreviewState.Text(content = text, isUrl = isUrl)
+        }
     }
 }

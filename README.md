@@ -4,8 +4,8 @@ A minimalist Android companion app for local-Wi-Fi, manual-push clipboard & quic
 
 ## Features
 
-- **Manual Push Only:** Push your Android clipboard via 1 tap in-app, the **Quick Settings Tile**, or send photos/files/links directly from Android's **Share Sheet** (`Drop via Kaze`).
-- **Floating Incoming Breeze Overlay:** Slides a translucent Suzuri toast over any app when you press `⌘⇧K` on your Mac, with explicit **Copy** / **Open** actions (never silently overwrites your clipboard).
+- **Clipboard Preview Before Push:** Always inspects and previews your current Android clipboard (text/URL, char count) before you confirm pushing—both in the main screen and in the Quick Settings Tile sheet. Never pushes blindly.
+- **On-Demand & Battery-Friendly (No Persistent Notification):** Connects automatically while Kaze, Share Sheet, or the Quick Settings preview is open (with a 20s grace window for app switching), then cleanly disconnects—zero idle battery drain and no permanent foreground-service notification. An optional **Background Listen** toggle is available in Settings if you want all-day floating overlays.
 - **Zero-Trust QR + 6-Digit PIN Pairing:** Offline CameraX + ZXing QR scanner with 6-digit PIN fallback and automatic `_kaze._tcp.` LAN discovery.
 - **Hardware-Backed P-256 Security:** Device signing key lives in **Android Keystore**; paired Mac fingerprint is pinned in Keystore-encrypted storage. Every transfer runs over an ephemeral ECDH (P-256) + mutual ECDSA + HKDF-SHA256 + streaming AES-256-GCM tunnel.
 - **Privacy & Safe Drops:** Honors `ClipDescription.EXTRA_IS_SENSITIVE` (Android 13+), keeps history in ephemeral RAM only, sets `allowBackup="false"` and `usesCleartextTraffic="false"`, sanitizes filenames into `Downloads/Kaze`, and quarantines executable/oversized files for confirmation.

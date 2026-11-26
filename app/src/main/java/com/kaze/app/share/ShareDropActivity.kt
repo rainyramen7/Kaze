@@ -54,7 +54,7 @@ class ShareDropActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val manager = (application as KazeApplication).connectionManager
-        manager.startDiscoveryAndConnect()
+        manager.acquireForegroundSession()
 
         val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
         val sharedUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -268,5 +268,10 @@ class ShareDropActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        (application as KazeApplication).connectionManager.releaseForegroundSession()
+        super.onDestroy()
     }
 }
