@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
@@ -42,7 +43,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -67,6 +70,7 @@ sealed interface ClipboardPreviewState {
 fun MainScreen(
     state: KazeUiState,
     clipboardPreview: ClipboardPreviewState,
+    onEditClipboardText: (String) -> Unit,
     onRefreshClipboard: () -> Unit,
     onPushPreviewText: (String) -> Unit,
     onPickFile: () -> Unit,
@@ -298,6 +302,7 @@ fun MainScreen(
                         isConnected = isConnected,
                         macName = state.pairedMac.deviceName,
                         showJapanese = jp,
+                        onEditText = onEditClipboardText,
                         onRefresh = onRefreshClipboard,
                         onPush = onPushPreviewText
                     )
@@ -496,9 +501,16 @@ private fun ClipboardPreviewCard(
     isConnected: Boolean,
     macName: String,
     showJapanese: Boolean,
+    onEditText: (String) -> Unit,
     onRefresh: () -> Unit,
     onPush: (String) -> Unit
 ) {
+    val editableText = when (preview) {
+        is ClipboardPreviewState.Text -> preview.content
+        ClipboardPreviewState.Empty -> ""
+        ClipboardPreviewState.SensitiveBlocked -> null
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -519,7 +531,7 @@ private fun ClipboardPreviewCard(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
-                    text = if (showJapanese) "クリップボード · CLIPBOARD PREVIEW" else "CLIPBOARD PREVIEW",
+                    text = if (showJapanese) "クリップボード · CLIPBOARD" else "CLIPBOARD PREVIEW",
                     fontFamily = FontFamily.Monospace,
                     fontSize = 9.5.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -540,89 +552,103 @@ private fun ClipboardPreviewCard(
                 }
             }
 
-            Icon(
-                imageVector = Icons.Outlined.Refresh,
-                contentDescription = "Refresh clipboard preview",
-                tint = SuzuriColors.Mist,
-                modifier = Modifier
-                    .size(16.dp)
-                    .clickable(onClick = onRefresh)
-            )
-        }
-
-        // Preview Body
-        when (preview) {
-            is ClipboardPreviewState.Empty -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(SuzuriColors.Base)
-                        .border(1.dp, SuzuriColors.Hairline, RoundedCornerShape(10.dp))
-                        .padding(horizontal = 12.dp, vertical = 14.dp)
-                ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (editableText != null) {
                     Text(
-                        text = "Clipboard is empty. Copy text or a link in any app to inspect it here before pushing.",
-                        fontSize = 11.5.sp,
-                        lineHeight = 17.sp,
+                        text = "TAP TO EDIT",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 8.5.sp,
                         color = SuzuriColors.Faint
                     )
                 }
-            }
-
-            is ClipboardPreviewState.SensitiveBlocked -> {
-                Row(
+                Icon(
+                    imageVector = Icons.Outlined.Refresh,
+                    contentDescription = "Refresh clipboard preview",
+                    tint = SuzuriColors.Mist,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(SuzuriColors.Base)
-                        .border(1.dp, SuzuriColors.Persimmon.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
-                        .padding(horizontal = 12.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(9.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Lock,
-                        contentDescription = null,
-                        tint = SuzuriColors.Persimmon,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = "Sensitive / password-manager clipboard item — hidden & blocked from push.",
-                        fontSize = 11.5.sp,
-                        lineHeight = 16.sp,
-                        color = SuzuriColors.Mist
-                    )
-                }
+                        .size(16.dp)
+                        .clickable(onClick = onRefresh)
+                )
             }
+        }
 
-            is ClipboardPreviewState.Text -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(SuzuriColors.Base)
-                        .border(1.dp, SuzuriColors.HairlineStrong, RoundedCornerShape(10.dp))
-                        .padding(horizontal = 12.dp, vertical = 11.dp)
-                ) {
-                    Text(
-                        text = preview.content,
+        // Preview / Editor Body
+        if (preview is ClipboardPreviewState.SensitiveBlocked) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(SuzuriColors.Base)
+                    .border(1.dp, SuzuriColors.Persimmon.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(9.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Lock,
+                    contentDescription = null,
+                    tint = SuzuriColors.Persimmon,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "Sensitive / password-manager clipboard item — hidden & blocked from push.",
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                    color = SuzuriColors.Mist
+                )
+            }
+        } else {
+            val currentText = editableText.orEmpty()
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(SuzuriColors.Base)
+                    .border(
+                        1.dp,
+                        if (currentText.isNotEmpty()) SuzuriColors.HairlineStrong else SuzuriColors.Hairline,
+                        RoundedCornerShape(10.dp)
+                    )
+                    .padding(horizontal = 12.dp, vertical = 11.dp)
+            ) {
+                BasicTextField(
+                    value = currentText,
+                    onValueChange = onEditText,
+                    textStyle = TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         lineHeight = 17.sp,
-                        color = SuzuriColors.Ivory,
-                        maxLines = 4,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                        color = SuzuriColors.Ivory
+                    ),
+                    cursorBrush = SolidColor(SuzuriColors.Persimmon),
+                    minLines = 2,
+                    maxLines = 6,
+                    modifier = Modifier.fillMaxWidth(),
+                    decorationBox = { innerTextField ->
+                        if (currentText.isEmpty()) {
+                            Text(
+                                text = "Clipboard is empty. Copy text in any app or tap here to type a note...",
+                                fontSize = 11.5.sp,
+                                lineHeight = 17.sp,
+                                color = SuzuriColors.Faint
+                            )
+                        }
+                        innerTextField()
+                    }
+                )
+            }
 
-                // Explicit Push Confirmation Button (only rendered when preview has safe text!)
+            val trimmed = currentText.trim()
+            if (trimmed.isNotEmpty()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
                         .background(if (isConnected) SuzuriColors.Persimmon else SuzuriColors.SurfaceAlt)
-                        .clickable(enabled = isConnected) { onPush(preview.content) }
+                        .clickable(enabled = isConnected) { onPush(trimmed) }
                         .padding(horizontal = 14.dp, vertical = 11.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically

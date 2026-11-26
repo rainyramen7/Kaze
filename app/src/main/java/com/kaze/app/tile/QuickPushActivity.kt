@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -31,9 +32,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kaze.app.KazeApplication
@@ -51,6 +53,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
  */
 class QuickPushActivity : ComponentActivity() {
     private val previewFlow = MutableStateFlow<ClipboardPreviewState>(ClipboardPreviewState.Empty)
+    private var loadedInitialClip = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -126,7 +129,7 @@ class QuickPushActivity : ComponentActivity() {
                             }
                         }
 
-                        // Clipboard preview box
+                        // Editable clipboard preview box
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -136,25 +139,48 @@ class QuickPushActivity : ComponentActivity() {
                                 .padding(12.dp)
                         ) {
                             when (val p = preview) {
-                                ClipboardPreviewState.Empty -> Text(
-                                    text = "Clipboard is empty.",
-                                    fontSize = 12.sp,
-                                    color = SuzuriColors.Faint
-                                )
                                 ClipboardPreviewState.SensitiveBlocked -> Text(
                                     text = "Sensitive / password-manager clip — blocked from push.",
                                     fontSize = 12.sp,
                                     color = SuzuriColors.Persimmon
                                 )
-                                is ClipboardPreviewState.Text -> Text(
-                                    text = p.content,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp,
-                                    lineHeight = 17.sp,
-                                    color = SuzuriColors.Ivory,
-                                    maxLines = 5,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                else -> {
+                                    val value = (p as? ClipboardPreviewState.Text)?.content.orEmpty()
+                                    BasicTextField(
+                                        value = value,
+                                        onValueChange = { edited ->
+                                            previewFlow.value = if (edited.isEmpty()) {
+                                                ClipboardPreviewState.Empty
+                                            } else {
+                                                val t = edited.trim()
+                                                ClipboardPreviewState.Text(
+                                                    content = edited,
+                                                    isUrl = t.startsWith("http://") || t.startsWith("https://")
+                                                )
+                                            }
+                                        },
+                                        textStyle = TextStyle(
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 12.sp,
+                                            lineHeight = 17.sp,
+                                            color = SuzuriColors.Ivory
+                                        ),
+                                        cursorBrush = SolidColor(SuzuriColors.Persimmon),
+                                        minLines = 2,
+                                        maxLines = 6,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        decorationBox = { inner ->
+                                            if (value.isEmpty()) {
+                                                Text(
+                                                    text = "Clipboard is empty — tap to type a note...",
+                                                    fontSize = 12.sp,
+                                                    color = SuzuriColors.Faint
+                                                )
+                                            }
+                                            inner()
+                                        }
+                                    )
+                                }
                             }
                         }
 
@@ -162,7 +188,7 @@ class QuickPushActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            val textToSend = (preview as? ClipboardPreviewState.Text)?.content
+                            val textToSend = (preview as? ClipboardPreviewState.Text)?.content?.trim()?.takeIf { it.isNotEmpty() }
                             val canPush = isConnected && textToSend != null && !pushed
                             Box(
                                 modifier = Modifier
@@ -203,7 +229,8 @@ class QuickPushActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus) return
+        if (!hasFocus || loadedInitialClip) return
+        loadedInitialClip = true
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = cm.primaryClip
         if (clip == null || clip.itemCount == 0) {

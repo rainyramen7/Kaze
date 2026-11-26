@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
     private val clipboardPreviewFlow = MutableStateFlow<ClipboardPreviewState>(ClipboardPreviewState.Empty)
+    private var lastSystemClipSignature: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -95,7 +96,16 @@ class MainActivity : ComponentActivity() {
                     MainScreen(
                         state = state,
                         clipboardPreview = clipboardPreview,
-                        onRefreshClipboard = { refreshClipboardPreview() },
+                        onEditClipboardText = { edited ->
+                            clipboardPreviewFlow.value = if (edited.isEmpty()) {
+                                ClipboardPreviewState.Empty
+                            } else {
+                                val trimmed = edited.trim()
+                                val isUrl = trimmed.startsWith("http://") || trimmed.startsWith("https://")
+                                ClipboardPreviewState.Text(content = edited, isUrl = isUrl)
+                            }
+                        },
+                        onRefreshClipboard = { refreshClipboardPreview(force = true) },
                         onPushPreviewText = { text -> manager.pushClipboardText(text) },
                         onPickFile = { filePickerLauncher.launch(arrayOf("*/*")) },
                         onOpenPairing = { showPairing = true },
@@ -152,15 +162,18 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
-            refreshClipboardPreview()
+            refreshClipboardPreview(force = false)
         }
     }
 
-    private fun refreshClipboardPreview() {
+    private fun refreshClipboardPreview(force: Boolean) {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = cm.primaryClip
         if (clip == null || clip.itemCount == 0) {
-            clipboardPreviewFlow.value = ClipboardPreviewState.Empty
+            if (force || lastSystemClipSignature != "__EMPTY__") {
+                lastSystemClipSignature = "__EMPTY__"
+                clipboardPreviewFlow.value = ClipboardPreviewState.Empty
+            }
             return
         }
         val isSensitive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -169,14 +182,20 @@ class MainActivity : ComponentActivity() {
             false
         }
         if (isSensitive) {
+            lastSystemClipSignature = "__SENSITIVE__"
             clipboardPreviewFlow.value = ClipboardPreviewState.SensitiveBlocked
             return
         }
-        val text = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty().trim()
-        if (text.isEmpty()) {
+        val text = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty()
+        val sig = "${clip.description?.timestamp ?: 0L}:$text"
+        if (!force && sig == lastSystemClipSignature) return
+        lastSystemClipSignature = sig
+
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) {
             clipboardPreviewFlow.value = ClipboardPreviewState.Empty
         } else {
-            val isUrl = text.startsWith("http://") || text.startsWith("https://")
+            val isUrl = trimmed.startsWith("http://") || trimmed.startsWith("https://")
             clipboardPreviewFlow.value = ClipboardPreviewState.Text(content = text, isUrl = isUrl)
         }
     }
