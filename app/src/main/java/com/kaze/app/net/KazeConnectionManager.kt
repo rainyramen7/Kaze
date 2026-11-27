@@ -145,13 +145,6 @@ class KazeConnectionManager(private val appContext: Context) {
     private val nsd = KazeNsdDiscovery(appContext)
     private val deviceName: String = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
 
-    // Load Keystore identity asynchronously on IO so Application.onCreate stays fast on cold start
-    private val identityDeferred: Deferred<KazeIdentity> = scope.async {
-        val loaded = KazeIdentity.loadOrCreateAndroidKeystore()
-        _uiState.update { it.copy(deviceShortFingerprint = loaded.shortFingerprint) }
-        loaded
-    }
-
     private val initialPairedMac: PairedMac? = store.loadPairedMac()
 
     private val _uiState = MutableStateFlow(
@@ -166,6 +159,9 @@ class KazeConnectionManager(private val appContext: Context) {
 
     private val _incomingToasts = MutableSharedFlow<IncomingToastEvent>(extraBufferCapacity = 8)
     val incomingToasts: SharedFlow<IncomingToastEvent> = _incomingToasts.asSharedFlow()
+
+    // Initialized strictly after _uiState so background IO never races uninitialized properties
+    private val identityDeferred: Deferred<KazeIdentity>
 
     private val writeLock = Any()
     private val lifecycleLock = Any()
@@ -186,6 +182,12 @@ class KazeConnectionManager(private val appContext: Context) {
     private val incomingFiles = mutableMapOf<String, IncomingFileBuffer>()
 
     init {
+        identityDeferred = scope.async {
+            val loaded = KazeIdentity.loadOrCreateAndroidKeystore()
+            _uiState.update { it.copy(deviceShortFingerprint = loaded.shortFingerprint) }
+            loaded
+        }
+
         // Sweep any stale temp files left from prior process kills off the main thread
         scope.launch {
             runCatching {
