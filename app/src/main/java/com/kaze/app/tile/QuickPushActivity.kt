@@ -23,7 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,8 +37,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kaze.app.KazeApplication
 import com.kaze.app.net.ConnectionStatus
+import com.kaze.app.net.KazeConnectionManager
 import com.kaze.app.ui.components.KakiMotif
 import com.kaze.app.ui.screens.ClipboardPreviewState
 import com.kaze.app.ui.theme.KazeTheme
@@ -59,12 +60,11 @@ class QuickPushActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val manager = (application as KazeApplication).connectionManager
-        manager.acquireForegroundSession()
 
         setContent {
             KazeTheme {
-                val state by manager.uiState.collectAsState()
-                val preview by previewFlow.collectAsState()
+                val state by manager.uiState.collectAsStateWithLifecycle()
+                val preview by previewFlow.collectAsStateWithLifecycle()
                 var pushed by remember { mutableStateOf(false) }
 
                 LaunchedEffect(pushed) {
@@ -246,7 +246,12 @@ class QuickPushActivity : ComponentActivity() {
             previewFlow.value = ClipboardPreviewState.SensitiveBlocked
             return
         }
-        val text = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty().trim()
+        val rawText = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty().trim()
+        val text = if (rawText.length > KazeConnectionManager.MAX_CLIPBOARD_BYTES) {
+            rawText.take(KazeConnectionManager.MAX_CLIPBOARD_BYTES)
+        } else {
+            rawText
+        }
         previewFlow.value = if (text.isEmpty()) {
             ClipboardPreviewState.Empty
         } else {
@@ -254,8 +259,13 @@ class QuickPushActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
+    override fun onStart() {
+        super.onStart()
+        (application as KazeApplication).connectionManager.acquireForegroundSession()
+    }
+
+    override fun onStop() {
         (application as KazeApplication).connectionManager.releaseForegroundSession()
-        super.onDestroy()
+        super.onStop()
     }
 }

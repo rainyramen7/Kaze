@@ -15,12 +15,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.kaze.app.crypto.KazeCrypto
+import com.kaze.app.net.KazeConnectionManager
 import com.kaze.app.net.KazeConnectionService
 import com.kaze.app.ui.screens.ClipboardPreviewState
 import com.kaze.app.ui.screens.MainScreen
@@ -46,9 +49,16 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             KazeTheme {
-                val state by manager.uiState.collectAsState()
-                val clipboardPreview by clipboardPreviewFlow.collectAsState()
+                val state by manager.uiState.collectAsStateWithLifecycle()
+                val clipboardPreview by clipboardPreviewFlow.collectAsStateWithLifecycle()
                 var showPairing by remember { mutableStateOf(false) }
+
+                DisposableEffect(showPairing) {
+                    manager.setPairingScreenVisible(showPairing)
+                    onDispose {
+                        if (showPairing) manager.setPairingScreenVisible(false)
+                    }
+                }
                 var showSettings by remember { mutableStateOf(false) }
                 var hasCameraPerm by remember {
                     mutableStateOf(
@@ -186,8 +196,13 @@ class MainActivity : ComponentActivity() {
             clipboardPreviewFlow.value = ClipboardPreviewState.SensitiveBlocked
             return
         }
-        val text = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty()
-        val sig = "${clip.description?.timestamp ?: 0L}:$text"
+        val rawText = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty()
+        val text = if (rawText.length > KazeConnectionManager.MAX_CLIPBOARD_BYTES) {
+            rawText.take(KazeConnectionManager.MAX_CLIPBOARD_BYTES)
+        } else {
+            rawText
+        }
+        val sig = "${clip.description?.timestamp ?: 0L}:${KazeCrypto.sha256Hex(text.toByteArray(Charsets.UTF_8))}"
         if (!force && sig == lastSystemClipSignature) return
         lastSystemClipSignature = sig
 

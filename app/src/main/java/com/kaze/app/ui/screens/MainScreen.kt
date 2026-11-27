@@ -40,6 +40,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -451,19 +452,21 @@ fun MainScreen(
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         state.sessionHistory.forEachIndexed { idx, item ->
-                            SessionBreezeCard(
-                                item = item,
-                                showJapanese = jp,
-                                highlightPersimmon = idx == 0 && state.isBursting,
-                                onCopy = { text ->
-                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    cm.setPrimaryClip(ClipData.newPlainText("Kaze", text))
-                                    Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
-                                    onRefreshClipboard()
-                                },
-                                onApproveQuarantine = { onApproveQuarantine(item.id) },
-                                onDiscardQuarantine = { onDiscardQuarantine(item.id) }
-                            )
+                            key(item.id) {
+                                SessionBreezeCard(
+                                    item = item,
+                                    showJapanese = jp,
+                                    highlightPersimmon = idx == 0 && state.isBursting,
+                                    onCopy = { text ->
+                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                        cm.setPrimaryClip(ClipData.newPlainText("Kaze", text))
+                                        Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+                                        onRefreshClipboard()
+                                    },
+                                    onApproveQuarantine = { onApproveQuarantine(item.id) },
+                                    onDiscardQuarantine = { onDiscardQuarantine(item.id) }
+                                )
+                            }
                         }
                     }
                 }

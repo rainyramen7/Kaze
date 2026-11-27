@@ -25,8 +25,9 @@ import com.kaze.app.net.IncomingToastEvent
  * Floating Suzuri & Persimmon translucent toast overlay (TYPE_APPLICATION_OVERLAY)
  * that slides down gently when Mac pushes a clipboard snippet, without silently overwriting Android's clipboard.
  */
-class BreezeOverlayController(private val context: Context) {
-    private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+class BreezeOverlayController(context: Context) {
+    private val appContext = context.applicationContext
+    private val windowManager = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val mainHandler = Handler(Looper.getMainLooper())
     private var currentView: View? = null
     private var dismissRunnable: Runnable? = null
@@ -62,19 +63,26 @@ class BreezeOverlayController(private val context: Context) {
     }
 
     fun dismiss() {
-        mainHandler.post { dismissInternal() }
+        mainHandler.removeCallbacksAndMessages(null)
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            dismissInternal()
+        } else {
+            mainHandler.post { dismissInternal() }
+        }
     }
 
     private fun dismissInternal() {
         dismissRunnable?.let { mainHandler.removeCallbacks(it) }
         dismissRunnable = null
         currentView?.let { view ->
+            view.animate().cancel()
             runCatching { windowManager.removeView(view) }
         }
         currentView = null
     }
 
     private fun buildSuzuriToastView(event: IncomingToastEvent, showJp: Boolean): View {
+        val context = appContext
         val wrapper = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), 0, dp(14), 0)
@@ -142,9 +150,9 @@ class BreezeOverlayController(private val context: Context) {
         header.addView(badge)
         card.addView(header)
 
-        // Snippet box
+        // Snippet box (cap rendered preview length to avoid layout stalls on large clips)
         val snippet = TextView(context).apply {
-            text = event.text
+            text = event.text.take(500)
             setTextColor(Color.parseColor("#F2EFE9"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             typeface = Typeface.MONOSPACE
@@ -247,5 +255,5 @@ class BreezeOverlayController(private val context: Context) {
     }
 
     private fun dp(value: Int): Int =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), context.resources.displayMetrics).toInt()
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), appContext.resources.displayMetrics).toInt()
 }

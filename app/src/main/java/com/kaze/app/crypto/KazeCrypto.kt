@@ -218,6 +218,7 @@ object KazeCrypto {
 
 /**
  * Stateful directional AES-256-GCM frame cipher with strictly monotonic 64-bit counters and AAD.
+ * Reuses Cipher instances and nonce/AAD buffers per direction to minimize per-chunk GC churn.
  */
 class KazeSessionCipher(
     c2sKey: ByteArray,
@@ -229,6 +230,13 @@ class KazeSessionCipher(
     private val sendDir = if (isServer) KazeDirection.SERVER_TO_CLIENT else KazeDirection.CLIENT_TO_SERVER
     private val recvDir = if (isServer) KazeDirection.CLIENT_TO_SERVER else KazeDirection.SERVER_TO_CLIENT
 
+    private val sendCipher: Cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    private val recvCipher: Cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    private val sendNonce = ByteArray(12).apply { this[3] = sendDir.byteValue }
+    private val recvNonce = ByteArray(12).apply { this[3] = recvDir.byteValue }
+    private val sendAad = ByteArray(9).apply { this[0] = sendDir.byteValue }
+    private val recvAad = ByteArray(9).apply { this[0] = recvDir.byteValue }
+
     private var sendCounter: Long = 0L
     private var recvCounter: Long = 0L
     private val sendLock = Any()
@@ -239,12 +247,11 @@ class KazeSessionCipher(
         check(counter >= 0L) { "Frame counter exhausted" }
         sendCounter = counter + 1L
 
-        val nonce = makeNonce(sendDir, counter)
-        val aad = makeAad(sendDir, counter)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, sendKey, GCMParameterSpec(128, nonce))
-        cipher.updateAAD(aad)
-        cipher.doFinal(plaintext)
+        writeCounterBE(sendNonce, 4, counter)
+        writeCounterBE(sendAad, 1, counter)
+        sendCipher.init(Cipher.ENCRYPT_MODE, sendKey, GCMParameterSpec(128, sendNonce))
+        sendCipher.updateAAD(sendAad)
+        sendCipher.doFinal(plaintext)
     }
 
     fun open(ciphertextAndTag: ByteArray): ByteArray = synchronized(recvLock) {
@@ -253,26 +260,21 @@ class KazeSessionCipher(
         check(counter >= 0L) { "Frame counter exhausted" }
         recvCounter = counter + 1L
 
-        val nonce = makeNonce(recvDir, counter)
-        val aad = makeAad(recvDir, counter)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, recvKey, GCMParameterSpec(128, nonce))
-        cipher.updateAAD(aad)
-        cipher.doFinal(ciphertextAndTag)
+        writeCounterBE(recvNonce, 4, counter)
+        writeCounterBE(recvAad, 1, counter)
+        recvCipher.init(Cipher.DECRYPT_MODE, recvKey, GCMParameterSpec(128, recvNonce))
+        recvCipher.updateAAD(recvAad)
+        recvCipher.doFinal(ciphertextAndTag)
     }
 
-    private fun makeNonce(direction: KazeDirection, counter: Long): ByteArray =
-        ByteBuffer.allocate(12)
-            .put(0x00)
-            .put(0x00)
-            .put(0x00)
-            .put(direction.byteValue)
-            .putLong(counter)
-            .array()
-
-    private fun makeAad(direction: KazeDirection, counter: Long): ByteArray =
-        ByteBuffer.allocate(9)
-            .put(direction.byteValue)
-            .putLong(counter)
-            .array()
+    private fun writeCounterBE(dest: ByteArray, offset: Int, counter: Long) {
+        dest[offset] = (counter ushr 56).toByte()
+        dest[offset + 1] = (counter ushr 48).toByte()
+        dest[offset + 2] = (counter ushr 40).toByte()
+        dest[offset + 3] = (counter ushr 32).toByte()
+        dest[offset + 4] = (counter ushr 24).toByte()
+        dest[offset + 5] = (counter ushr 16).toByte()
+        dest[offset + 6] = (counter ushr 8).toByte()
+        dest[offset + 7] = counter.toByte()
+    }
 }

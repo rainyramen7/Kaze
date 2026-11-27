@@ -1,5 +1,6 @@
 package com.kaze.app.ui.components
 
+import android.os.SystemClock
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -12,20 +13,21 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.StrokeCap
@@ -42,9 +44,11 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.kaze.app.ui.theme.SuzuriColors
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Offline CameraX + ZXing QR viewfinder with persimmon corner brackets and sweeping scan beam.
+ * Properly unbinds CameraX on dispose, throttles QR decoding to ~5.5 Hz, and reuses the YUV buffer.
  */
 @Composable
 fun QrCameraViewfinder(
@@ -54,9 +58,11 @@ fun QrCameraViewfinder(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
+    val cameraProviderHolder = remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    val isDisposed = remember { AtomicBoolean(false) }
 
     val scanTransition = rememberInfiniteTransition(label = "qrScan")
-    val beamY by scanTransition.animateFloat(
+    val beamYState = scanTransition.animateFloat(
         initialValue = 0.16f,
         targetValue = 0.84f,
         animationSpec = infiniteRepeatable(
@@ -67,7 +73,12 @@ fun QrCameraViewfinder(
     )
 
     DisposableEffect(Unit) {
-        onDispose { executor.shutdown() }
+        onDispose {
+            isDisposed.set(true)
+            runCatching { cameraProviderHolder.value?.unbindAll() }
+            cameraProviderHolder.value = null
+            executor.shutdown()
+        }
     }
 
     Box(
@@ -86,7 +97,11 @@ fun QrCameraViewfinder(
                 }
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                 cameraProviderFuture.addListener({
+                    if (isDisposed.get()) return@addListener
                     val provider = runCatching { cameraProviderFuture.get() }.getOrNull() ?: return@addListener
+                    if (isDisposed.get()) return@addListener
+                    cameraProviderHolder.value = provider
+
                     val preview = Preview.Builder().build().also {
                         it.surfaceProvider = previewView.surfaceProvider
                     }
@@ -95,9 +110,11 @@ fun QrCameraViewfinder(
                         .build()
                         .also { analysis ->
                             analysis.setAnalyzer(executor, ZxingQrAnalyzer { decoded ->
-                                if (decoded.startsWith("kaze://pair")) {
+                                if (!isDisposed.get() && decoded.startsWith("kaze://pair")) {
                                     ContextCompat.getMainExecutor(ctx).execute {
-                                        onQrScanned(decoded)
+                                        if (!isDisposed.get()) {
+                                            onQrScanned(decoded)
+                                        }
                                     }
                                 }
                             })
@@ -116,47 +133,56 @@ fun QrCameraViewfinder(
             }
         )
 
-        // Persimmon viewfinder brackets + sweeping scan line
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val padX = size.width * 0.22f
-            val padY = size.height * 0.14f
-            val left = padX
-            val right = size.width - padX
-            val top = padY
-            val bottom = size.height - padY
-            val arm = 22.dp.toPx()
-            val stroke = 2.6.dp.toPx()
+        // Persimmon viewfinder brackets + sweeping scan line (cached Brush, zero recompositions)
+        Spacer(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawWithCache {
+                    val padX = size.width * 0.22f
+                    val padY = size.height * 0.14f
+                    val left = padX
+                    val right = size.width - padX
+                    val top = padY
+                    val bottom = size.height - padY
+                    val arm = 22.dp.toPx()
+                    val stroke = 2.6.dp.toPx()
+                    val beamInset = 8.dp.toPx()
+                    val beamWidth = 2.dp.toPx()
+                    val beamBrush = Brush.horizontalGradient(
+                        colors = listOf(
+                            SuzuriColors.Persimmon.copy(alpha = 0f),
+                            SuzuriColors.Persimmon,
+                            SuzuriColors.Persimmon.copy(alpha = 0f)
+                        ),
+                        startX = left + beamInset,
+                        endX = right - beamInset
+                    )
 
-            // Top-left
-            drawLine(SuzuriColors.Persimmon, Offset(left, top), Offset(left + arm, top), stroke, StrokeCap.Round)
-            drawLine(SuzuriColors.Persimmon, Offset(left, top), Offset(left, top + arm), stroke, StrokeCap.Round)
-            // Top-right
-            drawLine(SuzuriColors.Persimmon, Offset(right, top), Offset(right - arm, top), stroke, StrokeCap.Round)
-            drawLine(SuzuriColors.Persimmon, Offset(right, top), Offset(right, top + arm), stroke, StrokeCap.Round)
-            // Bottom-left
-            drawLine(SuzuriColors.Persimmon, Offset(left, bottom), Offset(left + arm, bottom), stroke, StrokeCap.Round)
-            drawLine(SuzuriColors.Persimmon, Offset(left, bottom), Offset(left, bottom - arm), stroke, StrokeCap.Round)
-            // Bottom-right
-            drawLine(SuzuriColors.Persimmon, Offset(right, bottom), Offset(right - arm, bottom), stroke, StrokeCap.Round)
-            drawLine(SuzuriColors.Persimmon, Offset(right, bottom), Offset(right, bottom - arm), stroke, StrokeCap.Round)
+                    onDrawBehind {
+                        // Top-left
+                        drawLine(SuzuriColors.Persimmon, Offset(left, top), Offset(left + arm, top), stroke, StrokeCap.Round)
+                        drawLine(SuzuriColors.Persimmon, Offset(left, top), Offset(left, top + arm), stroke, StrokeCap.Round)
+                        // Top-right
+                        drawLine(SuzuriColors.Persimmon, Offset(right, top), Offset(right - arm, top), stroke, StrokeCap.Round)
+                        drawLine(SuzuriColors.Persimmon, Offset(right, top), Offset(right, top + arm), stroke, StrokeCap.Round)
+                        // Bottom-left
+                        drawLine(SuzuriColors.Persimmon, Offset(left, bottom), Offset(left + arm, bottom), stroke, StrokeCap.Round)
+                        drawLine(SuzuriColors.Persimmon, Offset(left, bottom), Offset(left, bottom - arm), stroke, StrokeCap.Round)
+                        // Bottom-right
+                        drawLine(SuzuriColors.Persimmon, Offset(right, bottom), Offset(right - arm, bottom), stroke, StrokeCap.Round)
+                        drawLine(SuzuriColors.Persimmon, Offset(right, bottom), Offset(right, bottom - arm), stroke, StrokeCap.Round)
 
-            // Sweeping persimmon beam
-            val y = size.height * beamY
-            drawLine(
-                brush = Brush.horizontalGradient(
-                    colors = listOf(
-                        SuzuriColors.Persimmon.copy(alpha = 0f),
-                        SuzuriColors.Persimmon,
-                        SuzuriColors.Persimmon.copy(alpha = 0f)
-                    ),
-                    startX = left + 8.dp.toPx(),
-                    endX = right - 8.dp.toPx()
-                ),
-                start = Offset(left + 8.dp.toPx(), y),
-                end = Offset(right - 8.dp.toPx(), y),
-                strokeWidth = 2.dp.toPx()
-            )
-        }
+                        // Sweeping persimmon beam (deferred State read inside draw phase)
+                        val y = size.height * beamYState.value
+                        drawLine(
+                            brush = beamBrush,
+                            start = Offset(left + beamInset, y),
+                            end = Offset(right - beamInset, y),
+                            strokeWidth = beamWidth
+                        )
+                    }
+                }
+        )
     }
 }
 
@@ -166,24 +192,32 @@ private class ZxingQrAnalyzer(
     private val reader = MultiFormatReader().apply {
         setHints(
             mapOf(
-                DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
-                DecodeHintType.TRY_HARDER to true
+                DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)
             )
         )
     }
-    private var lastDecodedAt = 0L
+    private var reusableBuffer = ByteArray(0)
+    private var lastAnalyzedAtMs = 0L
+    private var lastDecodedAtMs = 0L
 
     override fun analyze(image: ImageProxy) {
         try {
-            val now = System.currentTimeMillis()
-            if (now - lastDecodedAt < 1200L) return
+            val now = SystemClock.elapsedRealtime()
+            // Throttle analysis to ~5.5 Hz and debounce successful scans to save CPU/battery
+            if (now - lastAnalyzedAtMs < 180L || now - lastDecodedAtMs < 1200L) return
+            lastAnalyzedAtMs = now
+
             val plane = image.planes.firstOrNull() ?: return
             val buffer = plane.buffer
-            val data = ByteArray(buffer.remaining())
-            buffer.get(data)
+            val remaining = buffer.remaining()
+            if (reusableBuffer.size < remaining) {
+                reusableBuffer = ByteArray(remaining)
+            }
+            buffer.get(reusableBuffer, 0, remaining)
+
             val source = PlanarYUVLuminanceSource(
-                data,
-                image.width,
+                reusableBuffer,
+                plane.rowStride,
                 image.height,
                 0,
                 0,
@@ -194,7 +228,7 @@ private class ZxingQrAnalyzer(
             val bitmap = BinaryBitmap(HybridBinarizer(source))
             val result = reader.decodeWithState(bitmap)
             if (result?.text != null) {
-                lastDecodedAt = now
+                lastDecodedAtMs = now
                 onDecoded(result.text)
             }
         } catch (_: Throwable) {

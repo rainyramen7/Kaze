@@ -5,21 +5,24 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import com.kaze.app.crypto.FileSafety
 import com.kaze.app.crypto.KazeClientHandshake
-import com.kaze.app.crypto.KazeCrypto
 import com.kaze.app.crypto.KazeEnvelope
 import com.kaze.app.crypto.KazeFrameType
 import com.kaze.app.crypto.KazeIdentity
 import com.kaze.app.crypto.KazePairingPayload
 import com.kaze.app.crypto.KazeSessionCipher
 import com.kaze.app.crypto.KazeWireCodec
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -102,11 +105,23 @@ private class IncomingFileBuffer(
     val output = FileOutputStream(tempFile)
     val digest: MessageDigest = MessageDigest.getInstance("SHA-256")
     var bytesReceived: Long = 0L
+    private var lastReportedProgress: Float = 0f
+    private var lastReportedAtMs: Long = 0L
 
-    fun write(chunk: ByteArray) {
-        digest.update(chunk)
-        output.write(chunk)
-        bytesReceived += chunk.size
+    /** Writes directly from decoded frame slice without intermediate array copy; returns throttled progress. */
+    fun writeSlice(source: ByteArray, offset: Int, length: Int): Float? {
+        digest.update(source, offset, length)
+        output.write(source, offset, length)
+        bytesReceived += length
+        if (expectedSize <= 0L) return null
+        val progress = (bytesReceived.toFloat() / expectedSize.toFloat()).coerceIn(0.05f, 0.99f)
+        val now = SystemClock.elapsedRealtime()
+        if (progress - lastReportedProgress >= 0.02f || now - lastReportedAtMs >= 100L) {
+            lastReportedProgress = progress
+            lastReportedAtMs = now
+            return progress
+        }
+        return null
     }
 
     fun finishSha256Hex(): String {
@@ -128,16 +143,23 @@ class KazeConnectionManager(private val appContext: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val store = TrustedMacStore(appContext)
     private val nsd = KazeNsdDiscovery(appContext)
-    val identity: KazeIdentity = KazeIdentity.loadOrCreateAndroidKeystore()
     private val deviceName: String = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
+
+    // Load Keystore identity asynchronously on IO so Application.onCreate stays fast on cold start
+    private val identityDeferred: Deferred<KazeIdentity> = scope.async {
+        val loaded = KazeIdentity.loadOrCreateAndroidKeystore()
+        _uiState.update { it.copy(deviceShortFingerprint = loaded.shortFingerprint) }
+        loaded
+    }
+
+    private val initialPairedMac: PairedMac? = store.loadPairedMac()
 
     private val _uiState = MutableStateFlow(
         KazeUiState(
-            status = if (store.loadPairedMac() != null) ConnectionStatus.DISCOVERING else ConnectionStatus.UNPAIRED,
-            pairedMac = store.loadPairedMac(),
+            status = if (initialPairedMac != null) ConnectionStatus.DISCOVERING else ConnectionStatus.UNPAIRED,
+            pairedMac = initialPairedMac,
             showJapaneseLabels = store.showJapaneseLabels(),
-            backgroundListenEnabled = store.backgroundListenEnabled(),
-            deviceShortFingerprint = identity.shortFingerprint
+            backgroundListenEnabled = store.backgroundListenEnabled()
         )
     )
     val uiState: StateFlow<KazeUiState> = _uiState.asStateFlow()
@@ -148,22 +170,32 @@ class KazeConnectionManager(private val appContext: Context) {
     private val writeLock = Any()
     private val lifecycleLock = Any()
     private var foregroundRefCount: Int = 0
+    private var pairingScreenVisible: Boolean = false
     private var idleShutdownJob: Job? = null
+    private var burstJob: Job? = null
+    private var bannerJob: Job? = null
 
     @Volatile private var activeSocket: Socket? = null
     @Volatile private var activeOut: DataOutputStream? = null
     @Volatile private var activeCipher: KazeSessionCipher? = null
     @Volatile private var lastPingSentAtMs: Long = 0L
+    @Volatile private var lastPongReceivedAtMs: Long = 0L
 
     private var connectionJob: Job? = null
     private var pingJob: Job? = null
     private val incomingFiles = mutableMapOf<String, IncomingFileBuffer>()
 
     init {
+        // Sweep any stale temp files left from prior process kills off the main thread
+        scope.launch {
+            runCatching {
+                File(appContext.cacheDir, "kaze_incoming").deleteRecursively()
+            }
+        }
+
         scope.launch {
             nsd.discovered.collect { macs ->
                 _uiState.update { it.copy(discoveredMacs = macs) }
-                // Update paired Mac's LAN IP/port automatically if DHCP changed
                 val paired = _uiState.value.pairedMac ?: return@collect
                 val matched = macs.firstOrNull { discovered ->
                     discovered.fingerprintPrefix != null &&
@@ -189,9 +221,27 @@ class KazeConnectionManager(private val appContext: Context) {
             idleShutdownJob?.cancel()
             idleShutdownJob = null
         }
-        nsd.start()
+        val needNsd = synchronized(lifecycleLock) {
+            pairingScreenVisible || activeCipher == null
+        }
+        if (needNsd) {
+            nsd.start()
+        }
         if (_uiState.value.pairedMac != null && activeCipher == null) {
             connectToPairedMac()
+        }
+    }
+
+    /** Enables/disables mDNS browsing explicitly while PairingScreen is open. */
+    fun setPairingScreenVisible(visible: Boolean) {
+        val shouldStopNsd = synchronized(lifecycleLock) {
+            pairingScreenVisible = visible
+            !visible && activeCipher != null
+        }
+        if (visible) {
+            nsd.start()
+        } else if (shouldStopNsd) {
+            nsd.stop()
         }
     }
 
@@ -230,7 +280,7 @@ class KazeConnectionManager(private val appContext: Context) {
             if (stillIdle && _uiState.value.transferProgress == null && incomingFiles.isEmpty()) {
                 nsd.stop()
                 connectionJob?.cancel()
-                disconnectSocket()
+                disconnectSocket(expectedSocket = null)
                 _uiState.update { state ->
                     state.copy(
                         status = if (state.pairedMac != null) ConnectionStatus.DISCOVERING else ConnectionStatus.UNPAIRED,
@@ -300,7 +350,8 @@ class KazeConnectionManager(private val appContext: Context) {
 
     fun connectToPairedMac() {
         val paired = _uiState.value.pairedMac ?: return
-        if (connectionJob?.isActive == true && activeCipher != null) return
+        // Prevent cancelling an already in-flight handshake or active session
+        if (connectionJob?.isActive == true) return
         connectInternal(
             host = paired.host,
             port = paired.port,
@@ -313,7 +364,8 @@ class KazeConnectionManager(private val appContext: Context) {
     fun unpairMac() {
         scope.launch {
             runCatching { sendEnvelope(KazeEnvelope(type = "unpair")) }
-            disconnectSocket()
+            connectionJob?.cancel()
+            disconnectSocket(expectedSocket = null)
             store.clearPairedMac()
             _uiState.update {
                 it.copy(
@@ -335,6 +387,10 @@ class KazeConnectionManager(private val appContext: Context) {
             postBanner("Clipboard is empty", isError = true)
             return
         }
+        if (clean.toByteArray(Charsets.UTF_8).size > MAX_CLIPBOARD_BYTES) {
+            postBanner("Clipboard text exceeds 512 KB — share as file instead", isError = true)
+            return
+        }
         if (activeCipher == null) {
             postBanner("Not connected to Mac on LAN", isError = true)
             return
@@ -349,7 +405,7 @@ class KazeConnectionManager(private val appContext: Context) {
                         id = env.id,
                         direction = BreezeDirection.TO_MAC,
                         badge = badge,
-                        title = clean,
+                        title = clean.take(180),
                         meta = "Sent to ${_uiState.value.pairedMac?.deviceName ?: "Mac"} · Manual",
                         jpMeta = "送信済 · 今",
                         textPayload = clean
@@ -377,6 +433,7 @@ class KazeConnectionManager(private val appContext: Context) {
                 val safeName = FileSafety.sanitizeFileName(rawName)
                 val mime = resolver.getType(uri) ?: "application/octet-stream"
                 val transferId = UUID.randomUUID().toString()
+                val transferIdBytes = transferId.toByteArray(Charsets.UTF_8)
 
                 _uiState.update { it.copy(transferProgress = 0.03f) }
                 sendEnvelope(
@@ -391,17 +448,25 @@ class KazeConnectionManager(private val appContext: Context) {
 
                 val digest = MessageDigest.getInstance("SHA-256")
                 var sent = 0L
+                var lastProgress = 0.03f
+                var lastProgressAtMs = SystemClock.elapsedRealtime()
+
                 resolver.openInputStream(uri)?.use { input ->
                     val buf = ByteArray(64 * 1024)
                     while (true) {
                         val read = input.read(buf)
                         if (read <= 0) break
-                        val chunk = if (read == buf.size) buf else buf.copyOf(read)
-                        digest.update(chunk)
-                        sendRawEncryptedFrame(KazeWireCodec.encodeFileChunkFrame(transferId, chunk))
+                        digest.update(buf, 0, read)
+                        sendRawEncryptedFrame(KazeWireCodec.encodeFileChunkFrame(transferIdBytes, buf, read))
                         sent += read
                         if (fileSize > 0) {
-                            _uiState.update { it.copy(transferProgress = (sent.toFloat() / fileSize.toFloat()).coerceIn(0.05f, 0.99f)) }
+                            val progress = (sent.toFloat() / fileSize.toFloat()).coerceIn(0.05f, 0.99f)
+                            val now = SystemClock.elapsedRealtime()
+                            if (progress - lastProgress >= 0.02f || now - lastProgressAtMs >= 100L) {
+                                lastProgress = progress
+                                lastProgressAtMs = now
+                                _uiState.update { it.copy(transferProgress = progress) }
+                            }
                         }
                     }
                 } ?: error("Cannot read selected file")
@@ -433,6 +498,8 @@ class KazeConnectionManager(private val appContext: Context) {
                 triggerBurst()
                 postBanner("Delivered $safeName", isError = false)
                 onComplete?.invoke(true, "Delivered $safeName")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
                 _uiState.update { it.copy(transferProgress = null) }
                 val msg = "Drop failed: ${e.message}"
@@ -486,20 +553,22 @@ class KazeConnectionManager(private val appContext: Context) {
         expectedPrefix: String? = null
     ) {
         connectionJob?.cancel()
-        disconnectSocket()
+        disconnectSocket(expectedSocket = null)
 
         connectionJob = scope.launch {
             _uiState.update { it.copy(status = ConnectionStatus.CONNECTING) }
+            val socket = Socket()
             try {
-                val socket = Socket()
+                val id = identityDeferred.await()
                 socket.tcpNoDelay = true
+                socket.soTimeout = 10_000 // Strict 10s handshake read timeout
                 socket.connect(InetSocketAddress(host, port), 5_000)
 
                 val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
                 val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
 
                 val hs = KazeClientHandshake(
-                    identity = identity,
+                    identity = id,
                     deviceName = deviceName,
                     expectedServerFingerprintHex = expectedFingerprintHex,
                     pairingSecret = pairingSecret
@@ -517,9 +586,18 @@ class KazeConnectionManager(private val appContext: Context) {
 
                 KazeWireCodec.writeLengthPrefixed(output, clientAuthBytes)
 
+                // Authenticated! Relax socket read timeout to detect zombie half-open LAN links cleanly
+                socket.soTimeout = 95_000
                 activeSocket = socket
                 activeOut = output
                 activeCipher = outcome.cipher
+                lastPongReceivedAtMs = SystemClock.elapsedRealtime()
+
+                // Stop mDNS browsing while actively connected to save Wi-Fi battery
+                val keepNsd = synchronized(lifecycleLock) { pairingScreenVisible }
+                if (!keepNsd) {
+                    nsd.stop()
+                }
 
                 val pairedMac = PairedMac(
                     deviceName = outcome.peerName.ifBlank { fallbackName },
@@ -538,7 +616,7 @@ class KazeConnectionManager(private val appContext: Context) {
                     postBanner("Paired & pinned ${pairedMac.deviceName}", isError = false)
                 }
                 triggerBurst()
-                startPingLoop()
+                startPingLoop(socket)
 
                 // Encrypted receive loop
                 while (isActive && !socket.isClosed) {
@@ -546,15 +624,31 @@ class KazeConnectionManager(private val appContext: Context) {
                     val plaintext = outcome.cipher.open(encrypted)
                     handleDecryptedFrame(plaintext)
                 }
+            } catch (e: CancellationException) {
+                runCatching { socket.close() }
+                if (activeSocket === socket) {
+                    disconnectSocket(expectedSocket = socket)
+                }
+                throw e
             } catch (e: Throwable) {
-                disconnectSocket()
-                val hasPaired = _uiState.value.pairedMac != null
-                _uiState.update {
-                    it.copy(
-                        status = if (hasPaired) ConnectionStatus.DISCOVERING else ConnectionStatus.UNPAIRED,
-                        latencyMs = null,
-                        transferProgress = null
-                    )
+                runCatching { socket.close() }
+                if (activeSocket === socket || activeSocket == null) {
+                    disconnectSocket(expectedSocket = socket)
+                    val hasPaired = _uiState.value.pairedMac != null
+                    _uiState.update {
+                        it.copy(
+                            status = if (hasPaired) ConnectionStatus.DISCOVERING else ConnectionStatus.UNPAIRED,
+                            latencyMs = null,
+                            transferProgress = null
+                        )
+                    }
+                    // Restart NSD only if we are still actively foregrounded or Background Listen is enabled
+                    val stillActive = synchronized(lifecycleLock) {
+                        foregroundRefCount > 0 || _uiState.value.backgroundListenEnabled || pairingScreenVisible
+                    }
+                    if (hasPaired && stillActive) {
+                        nsd.start()
+                    }
                 }
                 if (pairingSecret != null) {
                     postBanner("Pairing failed: ${e.message}", isError = true)
@@ -563,13 +657,26 @@ class KazeConnectionManager(private val appContext: Context) {
         }
     }
 
-    private fun startPingLoop() {
+    private fun startPingLoop(socket: Socket) {
         pingJob?.cancel()
         pingJob = scope.launch {
-            while (isActive && activeCipher != null) {
-                lastPingSentAtMs = System.currentTimeMillis()
-                runCatching { sendEnvelope(KazeEnvelope(type = "ping")) }
-                delay(20_000)
+            while (isActive && activeSocket === socket && activeCipher != null) {
+                val now = SystemClock.elapsedRealtime()
+                val intervalMs = synchronized(lifecycleLock) {
+                    if (foregroundRefCount > 0) 30_000L else 55_000L
+                }
+                // Detect dead/zombie socket if peer stopped replying to pings
+                if (lastPongReceivedAtMs > 0 && now - lastPongReceivedAtMs > intervalMs * 2 + 15_000L) {
+                    runCatching { socket.close() }
+                    break
+                }
+                lastPingSentAtMs = now
+                val pingOk = runCatching { sendEnvelope(KazeEnvelope(type = "ping")) }.isSuccess
+                if (!pingOk) {
+                    runCatching { socket.close() }
+                    break
+                }
+                delay(intervalMs)
             }
         }
     }
@@ -583,18 +690,16 @@ class KazeConnectionManager(private val appContext: Context) {
                 handleEnvelope(env)
             }
             KazeFrameType.FILE_CHUNK.byteValue -> {
-                val frame = KazeWireCodec.decodeFileChunkFrame(payload) ?: return
-                val buf = incomingFiles[frame.transferId] ?: return
+                val slice = KazeWireCodec.decodeFileChunkSlice(payload) ?: return
+                val buf = incomingFiles[slice.transferId] ?: return
                 runCatching {
-                    buf.write(frame.chunk)
-                    if (buf.expectedSize > 0) {
-                        _uiState.update {
-                            it.copy(transferProgress = (buf.bytesReceived.toFloat() / buf.expectedSize.toFloat()).coerceIn(0.05f, 0.99f))
-                        }
+                    val throttledProgress = buf.writeSlice(payload, slice.offset, slice.length)
+                    if (throttledProgress != null) {
+                        _uiState.update { it.copy(transferProgress = throttledProgress) }
                     }
                 }.onFailure {
                     buf.abort()
-                    incomingFiles.remove(frame.transferId)
+                    incomingFiles.remove(slice.transferId)
                     _uiState.update { it.copy(transferProgress = null) }
                 }
             }
@@ -603,13 +708,21 @@ class KazeConnectionManager(private val appContext: Context) {
 
     private fun handleEnvelope(env: KazeEnvelope) {
         when (env.type) {
-            "ping" -> runCatching { sendEnvelope(KazeEnvelope(type = "pong", id = env.id)) }
+            "ping" -> {
+                lastPongReceivedAtMs = SystemClock.elapsedRealtime()
+                runCatching { sendEnvelope(KazeEnvelope(type = "pong", id = env.id)) }
+            }
             "pong" -> {
-                val delta = (System.currentTimeMillis() - lastPingSentAtMs).toInt().coerceAtLeast(1)
-                _uiState.update { it.copy(latencyMs = delta) }
+                val now = SystemClock.elapsedRealtime()
+                lastPongReceivedAtMs = now
+                val delta = (now - lastPingSentAtMs).toInt().coerceAtLeast(1)
+                if (_uiState.value.latencyMs != delta) {
+                    _uiState.update { it.copy(latencyMs = delta) }
+                }
             }
             "clipboard" -> {
-                val text = env.text?.takeIf { it.isNotEmpty() } ?: return
+                val raw = env.text?.takeIf { it.isNotEmpty() } ?: return
+                val text = if (raw.length > MAX_CLIPBOARD_BYTES) raw.take(MAX_CLIPBOARD_BYTES) else raw
                 val badge = if (text.startsWith("http://") || text.startsWith("https://")) "URL" else "CLIP"
                 val macName = _uiState.value.pairedMac?.deviceName ?: "MacBook"
                 prependHistory(
@@ -617,7 +730,7 @@ class KazeConnectionManager(private val appContext: Context) {
                         id = env.id,
                         direction = BreezeDirection.FROM_MAC,
                         badge = badge,
-                        title = text,
+                        title = text.take(180),
                         meta = "$macName · ${_uiState.value.latencyMs?.let { "${it}ms · " } ?: ""}P-256",
                         jpMeta = "受信 · 今",
                         textPayload = text
@@ -638,6 +751,11 @@ class KazeConnectionManager(private val appContext: Context) {
             }
             "file_start" -> {
                 val safeName = FileSafety.sanitizeFileName(env.fileName ?: "kaze_file")
+                incomingFiles.remove(env.id)?.abort()
+                if (incomingFiles.size >= 4) {
+                    postBanner("Too many concurrent incoming files", isError = true)
+                    return
+                }
                 val cacheDir = File(appContext.cacheDir, "kaze_incoming").apply { mkdirs() }
                 val temp = File(cacheDir, "${UUID.randomUUID()}_$safeName")
                 incomingFiles[env.id] = IncomingFileBuffer(
@@ -695,7 +813,8 @@ class KazeConnectionManager(private val appContext: Context) {
                 }
             }
             "unpair" -> {
-                disconnectSocket()
+                connectionJob?.cancel()
+                disconnectSocket(expectedSocket = null)
                 store.clearPairedMac()
                 _uiState.update {
                     it.copy(status = ConnectionStatus.UNPAIRED, pairedMac = null, latencyMs = null)
@@ -718,7 +837,8 @@ class KazeConnectionManager(private val appContext: Context) {
         }
     }
 
-    private fun disconnectSocket() {
+    private fun disconnectSocket(expectedSocket: Socket?) {
+        if (expectedSocket != null && activeSocket !== expectedSocket) return
         pingJob?.cancel()
         pingJob = null
         incomingFiles.values.forEach { it.abort() }
@@ -774,13 +894,20 @@ class KazeConnectionManager(private val appContext: Context) {
     }
 
     private fun prependHistory(item: SessionBreeze) {
+        val evicted = mutableListOf<File>()
         _uiState.update { state ->
-            state.copy(sessionHistory = (listOf(item) + state.sessionHistory).take(12))
+            val combined = listOf(item) + state.sessionHistory
+            if (combined.size > 12) {
+                combined.drop(12).forEach { old -> old.quarantinedFile?.let { evicted.add(it) } }
+            }
+            state.copy(sessionHistory = combined.take(12))
         }
+        evicted.forEach { runCatching { it.delete() } }
     }
 
     private fun triggerBurst() {
-        scope.launch {
+        burstJob?.cancel()
+        burstJob = scope.launch {
             _uiState.update { it.copy(isBursting = true) }
             delay(1_100)
             _uiState.update { it.copy(isBursting = false) }
@@ -788,7 +915,8 @@ class KazeConnectionManager(private val appContext: Context) {
     }
 
     private fun postBanner(message: String, isError: Boolean) {
-        scope.launch {
+        bannerJob?.cancel()
+        bannerJob = scope.launch {
             _uiState.update { it.copy(statusMessage = message, statusIsError = isError) }
             delay(3_800)
             _uiState.update {
@@ -798,6 +926,8 @@ class KazeConnectionManager(private val appContext: Context) {
     }
 
     companion object {
+        const val MAX_CLIPBOARD_BYTES = 512 * 1024
+
         fun formatBytes(bytes: Long): String = when {
             bytes < 1024L -> "$bytes B"
             bytes < 1024L * 1024L -> String.format("%.1f KB", bytes / 1024.0)

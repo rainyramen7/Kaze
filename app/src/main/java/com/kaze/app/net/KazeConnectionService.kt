@@ -20,30 +20,35 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
- * Lightweight foreground service maintaining the local encrypted LAN connection to your paired Mac
- * and presenting the floating Suzuri Incoming Breeze overlay when Mac pushes a clipboard item.
+ * Opt-in foreground service (OFF by default) for users who want all-day floating Mac toasts.
+ * Updates its foreground notification ONLY when connection status or paired Mac name changes.
  */
 class KazeConnectionService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var overlayController: BreezeOverlayController
+    private lateinit var notificationManager: NotificationManager
 
     override fun onCreate() {
         super.onCreate()
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         createChannels()
-        overlayController = BreezeOverlayController(this)
+        overlayController = BreezeOverlayController(applicationContext)
 
         val manager = (application as KazeApplication).connectionManager
-        manager.startDiscoveryAndConnect()
 
+        // Distinct collection avoids Binder notification storms during file chunk streaming or pings
         serviceScope.launch {
-            manager.uiState.collect { state ->
-                val notif = buildForegroundNotification(state)
-                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                nm.notify(NOTIF_ID_SERVICE, notif)
-            }
+            manager.uiState
+                .map { it.status to it.pairedMac?.deviceName }
+                .distinctUntilChanged()
+                .collect { (status, macName) ->
+                    notificationManager.notify(NOTIF_ID_SERVICE, buildForegroundNotification(status, macName))
+                }
         }
 
         serviceScope.launch {
@@ -59,7 +64,8 @@ class KazeConnectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val manager = (application as KazeApplication).connectionManager
-        val notification = buildForegroundNotification(manager.uiState.value)
+        val state = manager.uiState.value
+        val notification = buildForegroundNotification(state.status, state.pairedMac?.deviceName)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIF_ID_SERVICE, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
@@ -67,6 +73,13 @@ class KazeConnectionService : Service() {
         }
         manager.startDiscoveryAndConnect()
         return START_STICKY
+    }
+
+    /** Android 15+ (targetSdk >= 35) requirement for dataSync foreground services to stop cleanly on timeout. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        val manager = (application as KazeApplication).connectionManager
+        manager.setBackgroundListenEnabled(false)
+        stopSelf()
     }
 
     override fun onDestroy() {
@@ -77,16 +90,16 @@ class KazeConnectionService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun buildForegroundNotification(state: KazeUiState): Notification {
+    private fun buildForegroundNotification(status: ConnectionStatus, macName: String?): Notification {
         val openIntent = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val contentText = when (state.status) {
+        val contentText = when (status) {
             ConnectionStatus.CONNECTED ->
-                "Paired with ${state.pairedMac?.deviceName ?: "Mac"} · P-256 LAN"
+                "Paired with ${macName ?: "Mac"} · P-256 LAN"
             ConnectionStatus.CONNECTING -> "Handshaking with Mac on LAN..."
             ConnectionStatus.DISCOVERING -> "Listening for paired Mac on local Wi-Fi"
             else -> "Open Kaze to pair your Mac"
@@ -116,16 +129,14 @@ class KazeConnectionService : Service() {
             .setContentIntent(openIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(event.id.hashCode(), notif)
+        notificationManager.notify(event.id.hashCode(), notif)
     }
 
     private fun createChannels() {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(
+        notificationManager.createNotificationChannel(
             NotificationChannel(CHANNEL_SERVICE, "Kaze LAN Link", NotificationManager.IMPORTANCE_LOW)
         )
-        nm.createNotificationChannel(
+        notificationManager.createNotificationChannel(
             NotificationChannel(CHANNEL_BREEZE, "Incoming Breezes", NotificationManager.IMPORTANCE_HIGH)
         )
     }

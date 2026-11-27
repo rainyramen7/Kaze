@@ -25,7 +25,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kaze.app.KazeApplication
 import com.kaze.app.net.ConnectionStatus
 import com.kaze.app.ui.components.KakiMotif
@@ -54,7 +54,6 @@ class ShareDropActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val manager = (application as KazeApplication).connectionManager
-        manager.acquireForegroundSession()
 
         val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
         val sharedUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -66,7 +65,7 @@ class ShareDropActivity : ComponentActivity() {
 
         setContent {
             KazeTheme {
-                val state by manager.uiState.collectAsState()
+                val state by manager.uiState.collectAsStateWithLifecycle()
                 var sentResult by remember { mutableStateOf<String?>(null) }
                 var sending by remember { mutableStateOf(false) }
 
@@ -270,8 +269,13 @@ class ShareDropActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
+    override fun onStart() {
+        super.onStart()
+        (application as KazeApplication).connectionManager.acquireForegroundSession()
+    }
+
+    override fun onStop() {
         (application as KazeApplication).connectionManager.releaseForegroundSession()
-        super.onDestroy()
+        super.onStop()
     }
 }

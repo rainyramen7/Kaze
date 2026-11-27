@@ -65,6 +65,12 @@ data class FileChunkFrame(
     val chunk: ByteArray
 )
 
+data class FileChunkSlice(
+    val transferId: String,
+    val offset: Int,
+    val length: Int
+)
+
 object KazeWireCodec {
     const val MAX_FRAME_BYTES = 2 * 1024 * 1024
 
@@ -94,23 +100,34 @@ object KazeWireCodec {
         return out
     }
 
-    fun encodeFileChunkFrame(transferId: String, chunk: ByteArray): ByteArray {
+    fun encodeFileChunkFrame(transferId: String, chunk: ByteArray, length: Int = chunk.size): ByteArray {
         val idBytes = transferId.toByteArray(Charsets.UTF_8)
-        val out = ByteBuffer.allocate(1 + 2 + idBytes.size + chunk.size)
-        out.put(KazeFrameType.FILE_CHUNK.byteValue)
-        out.putShort(idBytes.size.toShort())
-        out.put(idBytes)
-        out.put(chunk)
-        return out.array()
+        return encodeFileChunkFrame(idBytes, chunk, length)
     }
 
-    fun decodeFileChunkFrame(payload: ByteArray): FileChunkFrame? {
+    fun encodeFileChunkFrame(transferIdBytes: ByteArray, chunk: ByteArray, length: Int): ByteArray {
+        val out = ByteArray(1 + 2 + transferIdBytes.size + length)
+        out[0] = KazeFrameType.FILE_CHUNK.byteValue
+        out[1] = ((transferIdBytes.size ushr 8) and 0xFF).toByte()
+        out[2] = (transferIdBytes.size and 0xFF).toByte()
+        System.arraycopy(transferIdBytes, 0, out, 3, transferIdBytes.size)
+        System.arraycopy(chunk, 0, out, 3 + transferIdBytes.size, length)
+        return out
+    }
+
+    fun decodeFileChunkSlice(payload: ByteArray): FileChunkSlice? {
         if (payload.size < 3 || payload[0] != KazeFrameType.FILE_CHUNK.byteValue) return null
         val idLen = ((payload[1].toInt() and 0xFF) shl 8) or (payload[2].toInt() and 0xFF)
         if (payload.size < 3 + idLen) return null
         val transferId = String(payload, 3, idLen, Charsets.UTF_8)
-        val chunk = payload.copyOfRange(3 + idLen, payload.size)
-        return FileChunkFrame(transferId, chunk)
+        val offset = 3 + idLen
+        return FileChunkSlice(transferId, offset, payload.size - offset)
+    }
+
+    fun decodeFileChunkFrame(payload: ByteArray): FileChunkFrame? {
+        val slice = decodeFileChunkSlice(payload) ?: return null
+        val chunk = payload.copyOfRange(slice.offset, slice.offset + slice.length)
+        return FileChunkFrame(slice.transferId, chunk)
     }
 }
 

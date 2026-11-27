@@ -1,2 +1,3 @@
-# Keep Kaze protocol classes if minification is enabled in future release builds
+# Keep Kaze protocol & crypto classes cleanly for R8 release builds
 -keep class com.kaze.app.crypto.** { *; }
+-dontwarn com.google.zxing.**
