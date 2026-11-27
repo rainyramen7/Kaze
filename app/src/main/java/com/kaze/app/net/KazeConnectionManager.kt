@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -139,11 +140,26 @@ private class IncomingFileBuffer(
 /**
  * Central encrypted LAN connection manager between Kaze (Android) and KazeMac.
  */
-class KazeConnectionManager(private val appContext: Context) {
+class KazeConnectionManager internal constructor(
+    private val appContext: Context?,
+    private val store: MacTrustRepository,
+    private val nsd: MacDiscoverySource,
+    private val cacheRootDir: File,
+    private val identityLoader: () -> KazeIdentity,
+    private val clockMs: () -> Long,
+    private val deviceName: String
+) {
+    constructor(appContext: Context) : this(
+        appContext = appContext,
+        store = TrustedMacStore(appContext),
+        nsd = KazeNsdDiscovery(appContext),
+        cacheRootDir = appContext.cacheDir,
+        identityLoader = { KazeIdentity.loadOrCreateAndroidKeystore() },
+        clockMs = { SystemClock.elapsedRealtime() },
+        deviceName = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val store = TrustedMacStore(appContext)
-    private val nsd = KazeNsdDiscovery(appContext)
-    private val deviceName: String = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
 
     private val initialPairedMac: PairedMac? = store.loadPairedMac()
 
@@ -183,7 +199,7 @@ class KazeConnectionManager(private val appContext: Context) {
 
     init {
         identityDeferred = scope.async {
-            val loaded = KazeIdentity.loadOrCreateAndroidKeystore()
+            val loaded = identityLoader()
             _uiState.update { it.copy(deviceShortFingerprint = loaded.shortFingerprint) }
             loaded
         }
@@ -191,7 +207,7 @@ class KazeConnectionManager(private val appContext: Context) {
         // Sweep any stale temp files left from prior process kills off the main thread
         scope.launch {
             runCatching {
-                File(appContext.cacheDir, "kaze_incoming").deleteRecursively()
+                File(cacheRootDir, "kaze_incoming").deleteRecursively()
             }
         }
 
@@ -301,12 +317,19 @@ class KazeConnectionManager(private val appContext: Context) {
                 idleShutdownJob?.cancel()
                 idleShutdownJob = null
             }
-            KazeConnectionService.start(appContext)
+            appContext?.let { KazeConnectionService.start(it) }
         } else {
-            KazeConnectionService.stop(appContext)
+            appContext?.let { KazeConnectionService.stop(it) }
             val isBg = synchronized(lifecycleLock) { foregroundRefCount == 0 }
             if (isBg) scheduleIdleDisconnect()
         }
+    }
+
+    internal fun shutdownForTest() {
+        nsd.stop()
+        connectionJob?.cancel()
+        disconnectSocket(expectedSocket = null)
+        scope.cancel()
     }
 
     fun setShowJapaneseLabels(enabled: Boolean) {
@@ -430,7 +453,7 @@ class KazeConnectionManager(private val appContext: Context) {
         }
         scope.launch {
             try {
-                val resolver = appContext.contentResolver
+                val resolver = appContext?.contentResolver ?: error("No ContentResolver available")
                 val (rawName, fileSize) = queryUriMetadata(uri)
                 val safeName = FileSafety.sanitizeFileName(rawName)
                 val mime = resolver.getType(uri) ?: "application/octet-stream"
@@ -593,7 +616,7 @@ class KazeConnectionManager(private val appContext: Context) {
                 activeSocket = socket
                 activeOut = output
                 activeCipher = outcome.cipher
-                lastPongReceivedAtMs = SystemClock.elapsedRealtime()
+                lastPongReceivedAtMs = clockMs()
 
                 // Stop mDNS browsing while actively connected to save Wi-Fi battery
                 val keepNsd = synchronized(lifecycleLock) { pairingScreenVisible }
@@ -663,7 +686,7 @@ class KazeConnectionManager(private val appContext: Context) {
         pingJob?.cancel()
         pingJob = scope.launch {
             while (isActive && activeSocket === socket && activeCipher != null) {
-                val now = SystemClock.elapsedRealtime()
+                val now = clockMs()
                 val intervalMs = synchronized(lifecycleLock) {
                     if (foregroundRefCount > 0) 30_000L else 55_000L
                 }
@@ -711,11 +734,11 @@ class KazeConnectionManager(private val appContext: Context) {
     private fun handleEnvelope(env: KazeEnvelope) {
         when (env.type) {
             "ping" -> {
-                lastPongReceivedAtMs = SystemClock.elapsedRealtime()
+                lastPongReceivedAtMs = clockMs()
                 runCatching { sendEnvelope(KazeEnvelope(type = "pong", id = env.id)) }
             }
             "pong" -> {
-                val now = SystemClock.elapsedRealtime()
+                val now = clockMs()
                 lastPongReceivedAtMs = now
                 val delta = (now - lastPingSentAtMs).toInt().coerceAtLeast(1)
                 if (_uiState.value.latencyMs != delta) {
@@ -758,7 +781,7 @@ class KazeConnectionManager(private val appContext: Context) {
                     postBanner("Too many concurrent incoming files", isError = true)
                     return
                 }
-                val cacheDir = File(appContext.cacheDir, "kaze_incoming").apply { mkdirs() }
+                val cacheDir = File(cacheRootDir, "kaze_incoming").apply { mkdirs() }
                 val temp = File(cacheDir, "${UUID.randomUUID()}_$safeName")
                 incomingFiles[env.id] = IncomingFileBuffer(
                     id = env.id,
@@ -852,6 +875,7 @@ class KazeConnectionManager(private val appContext: Context) {
     }
 
     private fun saveFileToDownloadsKaze(source: File, sanitizedName: String, mimeType: String): Uri? {
+        val ctx = appContext ?: return null
         return runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
@@ -860,7 +884,7 @@ class KazeConnectionManager(private val appContext: Context) {
                     put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Kaze")
                     put(MediaStore.Downloads.IS_PENDING, 1)
                 }
-                val resolver = appContext.contentResolver
+                val resolver = ctx.contentResolver
                 val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
                 resolver.openOutputStream(uri)?.use { out ->
                     source.inputStream().use { input -> input.copyTo(out) }
@@ -884,7 +908,7 @@ class KazeConnectionManager(private val appContext: Context) {
     private suspend fun queryUriMetadata(uri: Uri): Pair<String, Long> = withContext(Dispatchers.IO) {
         var name = "kaze_drop"
         var size = -1L
-        appContext.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        appContext?.contentResolver?.query(uri, null, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
                 val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)

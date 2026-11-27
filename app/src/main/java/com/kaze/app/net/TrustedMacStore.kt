@@ -19,13 +19,23 @@ data class PairedMac(
     val pairedAtMs: Long = System.currentTimeMillis()
 )
 
+interface MacTrustRepository {
+    fun loadPairedMac(): PairedMac?
+    fun savePairedMac(mac: PairedMac)
+    fun clearPairedMac()
+    fun showJapaneseLabels(): Boolean
+    fun setShowJapaneseLabels(show: Boolean)
+    fun backgroundListenEnabled(): Boolean
+    fun setBackgroundListenEnabled(enabled: Boolean)
+}
+
 /**
  * Stores the paired Mac's pinned P-256 fingerprint encrypted at rest with an Android Keystore AES-256-GCM key.
  */
-class TrustedMacStore(context: Context) {
+class TrustedMacStore(context: Context) : MacTrustRepository {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    fun loadPairedMac(): PairedMac? {
+    override fun loadPairedMac(): PairedMac? {
         val blob = prefs.getString(KEY_PAIRED_MAC_ENC, null) ?: return null
         val jsonStr = decrypt(blob) ?: return null
         return try {
@@ -42,7 +52,7 @@ class TrustedMacStore(context: Context) {
         }
     }
 
-    fun savePairedMac(mac: PairedMac) {
+    override fun savePairedMac(mac: PairedMac) {
         val obj = JSONObject().apply {
             put("deviceName", mac.deviceName)
             put("host", mac.host)
@@ -54,19 +64,19 @@ class TrustedMacStore(context: Context) {
         prefs.edit().putString(KEY_PAIRED_MAC_ENC, encrypted).apply()
     }
 
-    fun clearPairedMac() {
+    override fun clearPairedMac() {
         prefs.edit().remove(KEY_PAIRED_MAC_ENC).apply()
     }
 
-    fun showJapaneseLabels(): Boolean = prefs.getBoolean(KEY_SHOW_JP, true)
+    override fun showJapaneseLabels(): Boolean = prefs.getBoolean(KEY_SHOW_JP, true)
 
-    fun setShowJapaneseLabels(show: Boolean) {
+    override fun setShowJapaneseLabels(show: Boolean) {
         prefs.edit().putBoolean(KEY_SHOW_JP, show).apply()
     }
 
-    fun backgroundListenEnabled(): Boolean = prefs.getBoolean(KEY_BG_LISTEN, false)
+    override fun backgroundListenEnabled(): Boolean = prefs.getBoolean(KEY_BG_LISTEN, false)
 
-    fun setBackgroundListenEnabled(enabled: Boolean) {
+    override fun setBackgroundListenEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_BG_LISTEN, enabled).apply()
     }
 

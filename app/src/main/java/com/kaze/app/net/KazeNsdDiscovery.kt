@@ -16,15 +16,21 @@ data class DiscoveredMac(
     val fingerprintPrefix: String? = null
 )
 
+interface MacDiscoverySource {
+    val discovered: StateFlow<List<DiscoveredMac>>
+    fun start()
+    fun stop()
+}
+
 /**
  * Discovers KazeMac servers on local Wi-Fi via mDNS (`_kaze._tcp.`).
  * Discovery is strictly a locator; cryptographic trust is enforced by pinned P-256 keys.
  * Synchronized to prevent duplicate listener leaks and serializes resolveService calls cleanly.
  */
-class KazeNsdDiscovery(context: Context) {
+class KazeNsdDiscovery(context: Context) : MacDiscoverySource {
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val _discovered = MutableStateFlow<List<DiscoveredMac>>(emptyList())
-    val discovered: StateFlow<List<DiscoveredMac>> = _discovered.asStateFlow()
+    override val discovered: StateFlow<List<DiscoveredMac>> = _discovered.asStateFlow()
 
     private val lock = Any()
     private var discoveryListener: NsdManager.DiscoveryListener? = null
@@ -32,7 +38,7 @@ class KazeNsdDiscovery(context: Context) {
     private val queuedNames = mutableSetOf<String>()
     private var isResolving = false
 
-    fun start() {
+    override fun start() {
         val listenerToRegister = synchronized(lock) {
             if (discoveryListener != null) return
             val listener = object : NsdManager.DiscoveryListener {
@@ -86,7 +92,7 @@ class KazeNsdDiscovery(context: Context) {
         }
     }
 
-    fun stop() {
+    override fun stop() {
         val listener = synchronized(lock) {
             resolveQueue.clear()
             queuedNames.clear()
